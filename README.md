@@ -1,2 +1,2 @@
 # farting_trees
-methanogens and methanotrophs in trees
+Trees' methanogens and methanotrophs sequencing data and analysis pipeline
