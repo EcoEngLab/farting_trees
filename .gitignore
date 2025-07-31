@@ -1,2 +1,56 @@
-# ignore all files under sandbox
+# Track only code and documentation files
+# Ignore everything by default
+*
+
+# But track these important files
+!.gitignore
+!README.md
+!USAGE.md
+!TROUBLESHOOTING.md
+
+# Track all code files
+!code/
+!code/**
+
+# Track configuration files
+!config/
+!config/**
+
+
+# Ignore specific file types everywhere
+*.doc
+*.docx
+*.pdf
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+
+# Ignore large data and results
+data/
+results/
 sandbox/
+*.fastq
+*.fastq.gz
+*.fasta
+*.fa
+*.fna
+*.sam
+*.bam
+*.bai
+*.bt2
+*.zip
+*.tar.gz
+*.log
+
+# Ignore conda environments
+envs/
+*.conda
+environment.yml.lock
+
+# Ignore temporary files
+.DS_Store
+.vscode/
+*.tmp
+*.temp
+*~
