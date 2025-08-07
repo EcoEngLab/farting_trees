@@ -7,8 +7,9 @@
 set -e
 
 # Configuration
-BINNING_DIR="../results/03_binning"
-RESULTS_DIR="../results/04_annotation"
+WORK_DIR="/home/jiayi-chen/Documents/farting_trees"
+BINNING_DIR="${WORK_DIR}/results/04_binning"
+RESULTS_DIR="${WORK_DIR}/results/05_annotation"
 THREADS=8
 
 # Activate annotation environment
@@ -20,48 +21,59 @@ echo "Starting MAG annotation and taxonomic classification..."
 # Create output directories
 mkdir -p ${RESULTS_DIR}/{prokka,gtdbtk,eggnog,summary}
 
-# Sample list
-SAMPLES=("53394_A15" "53395_A16" "53396_B6" "53397_B10" "53398_A16S" "53399_B10S")
+echo "Working with co-assembly bins from MetaBAT2..."
 
 # Step 1: Gene prediction and annotation with Prokka
 echo "Running Prokka for gene prediction and annotation..."
-for sample in "${SAMPLES[@]}"; do
-    echo "Prokka annotation for sample: $sample"
-    
-    # Process DAS Tool bins (high quality)
-    if [ -d "${BINNING_DIR}/das_tool/${sample}_DASToolBins_DASTool_bins" ]; then
-        for bin in ${BINNING_DIR}/das_tool/${sample}_DASToolBins_DASTool_bins/*.fa; do
-            if [ -f "$bin" ]; then
-                bin_name=$(basename "$bin" .fa)
-                echo "  Annotating bin: $bin_name"
-                
-                prokka --outdir ${RESULTS_DIR}/prokka/${sample}_${bin_name} \
-                       --prefix ${sample}_${bin_name} \
+
+# Process MetaBAT2 co-assembly bins
+if [ -d "${BINNING_DIR}/metabat2" ]; then
+    echo "Processing MetaBAT2 co-assembly bins..."
+    for bin in ${BINNING_DIR}/metabat2/coassembly_bin.*.fa; do
+        if [ -f "$bin" ]; then
+            bin_name=$(basename "$bin" .fa)
+            echo "  Annotating bin: $bin_name"
+            
+            # Check if Prokka is available
+            if command -v prokka &> /dev/null; then
+                prokka --outdir ${RESULTS_DIR}/prokka/${bin_name} \
+                       --prefix ${bin_name} \
+                       --kingdom Bacteria \
+                       --cpus ${THREADS} \
+                       --force \
+                       $bin
+            else
+                echo "⚠ Warning: Prokka not found, skipping gene annotation"
+                echo "You can install Prokka with: conda install -c bioconda prokka"
+                mkdir -p ${RESULTS_DIR}/prokka
+                echo "Skipping Prokka due to missing installation" > ${RESULTS_DIR}/prokka/SKIPPED.txt
+                break
+            fi
+        fi
+    done
+else
+    echo "⚠ No MetaBAT2 bins found in ${BINNING_DIR}/metabat2"
+fi
+
+# Process DAS Tool bins if available
+if [ -d "${BINNING_DIR}/das_tool" ] && [ -d "${BINNING_DIR}/das_tool/coassembly_DASToolBins_DASTool_bins" ]; then
+    echo "Processing DAS Tool co-assembly bins..."
+    for bin in ${BINNING_DIR}/das_tool/coassembly_DASToolBins_DASTool_bins/*.fa; do
+        if [ -f "$bin" ]; then
+            bin_name="dastool_$(basename "$bin" .fa)"
+            echo "  Annotating DAS Tool bin: $bin_name"
+            
+            if command -v prokka &> /dev/null; then
+                prokka --outdir ${RESULTS_DIR}/prokka/${bin_name} \
+                       --prefix ${bin_name} \
                        --kingdom Bacteria \
                        --cpus ${THREADS} \
                        --force \
                        $bin
             fi
-        done
-    fi
-    
-    # Process MetaBAT2 bins if DAS Tool bins not available
-    if [ ! -d "${BINNING_DIR}/das_tool/${sample}_DASToolBins_DASTool_bins" ]; then
-        for bin in ${BINNING_DIR}/metabat2/${sample}_bin*.fa; do
-            if [ -f "$bin" ]; then
-                bin_name=$(basename "$bin" .fa)
-                echo "  Annotating MetaBAT2 bin: $bin_name"
-                
-                prokka --outdir ${RESULTS_DIR}/prokka/${sample}_${bin_name} \
-                       --prefix ${sample}_${bin_name} \
-                       --kingdom Bacteria \
-                       --cpus ${THREADS} \
-                       --force \
-                       $bin
-            fi
-        done
-    fi
-done
+        fi
+    done
+fi
 
 # Step 2: Taxonomic classification with GTDB-Tk
 echo "Running GTDB-Tk for taxonomic classification..."
@@ -69,44 +81,56 @@ echo "Running GTDB-Tk for taxonomic classification..."
 # Collect all high-quality bins for batch processing
 mkdir -p ${RESULTS_DIR}/gtdbtk/input_bins
 
-for sample in "${SAMPLES[@]}"; do
-    # Use DAS Tool bins preferentially
-    if [ -d "${BINNING_DIR}/das_tool/${sample}_DASToolBins_DASTool_bins" ]; then
-        for bin in ${BINNING_DIR}/das_tool/${sample}_DASToolBins_DASTool_bins/*.fa; do
-            if [ -f "$bin" ]; then
-                bin_name="${sample}_$(basename "$bin")"
-                cp "$bin" ${RESULTS_DIR}/gtdbtk/input_bins/$bin_name
-            fi
-        done
-    else
-        # Use MetaBAT2 bins as fallback
-        for bin in ${BINNING_DIR}/metabat2/${sample}_bin*.fa; do
-            if [ -f "$bin" ]; then
-                bin_name="${sample}_$(basename "$bin")"
-                cp "$bin" ${RESULTS_DIR}/gtdbtk/input_bins/$bin_name
-            fi
-        done
-    fi
-done
+# Copy MetaBAT2 co-assembly bins
+if [ -d "${BINNING_DIR}/metabat2" ]; then
+    echo "Copying MetaBAT2 co-assembly bins for GTDB-Tk..."
+    for bin in ${BINNING_DIR}/metabat2/coassembly_bin.*.fa; do
+        if [ -f "$bin" ]; then
+            bin_name=$(basename "$bin")
+            cp "$bin" ${RESULTS_DIR}/gtdbtk/input_bins/$bin_name
+            echo "  Copied: $bin_name"
+        fi
+    done
+fi
+
+# Copy DAS Tool bins if available
+if [ -d "${BINNING_DIR}/das_tool/coassembly_DASToolBins_DASTool_bins" ]; then
+    echo "Copying DAS Tool co-assembly bins for GTDB-Tk..."
+    for bin in ${BINNING_DIR}/das_tool/coassembly_DASToolBins_DASTool_bins/*.fa; do
+        if [ -f "$bin" ]; then
+            bin_name="dastool_$(basename "$bin")"
+            cp "$bin" ${RESULTS_DIR}/gtdbtk/input_bins/$bin_name
+            echo "  Copied: $bin_name"
+        fi
+    done
+fi
 
 # Run GTDB-Tk classify workflow
-if [ "$(ls -A ${RESULTS_DIR}/gtdbtk/input_bins)" ]; then
+if [ "$(ls -A ${RESULTS_DIR}/gtdbtk/input_bins 2>/dev/null)" ]; then
     echo "Running GTDB-Tk classification..."
-    gtdbtk classify_wf --genome_dir ${RESULTS_DIR}/gtdbtk/input_bins \
-                       --out_dir ${RESULTS_DIR}/gtdbtk/output \
-                       --cpus ${THREADS} \
-                       --extension fa
+    
+    # Check if GTDB-Tk is available
+    if command -v gtdbtk &> /dev/null; then
+        gtdbtk classify_wf --genome_dir ${RESULTS_DIR}/gtdbtk/input_bins \
+                           --out_dir ${RESULTS_DIR}/gtdbtk/output \
+                           --cpus ${THREADS} \
+                           --extension fa
+    else
+        echo "⚠ Warning: GTDB-Tk not found, skipping taxonomic classification"
+        echo "You can install GTDB-Tk with: conda install -c bioconda gtdbtk"
+        mkdir -p ${RESULTS_DIR}/gtdbtk
+        echo "Skipping GTDB-Tk due to missing installation" > ${RESULTS_DIR}/gtdbtk/SKIPPED.txt
+    fi
 else
     echo "No bins found for GTDB-Tk classification"
 fi
 
 # Step 3: Functional annotation with eggNOG-mapper
 echo "Running eggNOG-mapper for functional annotation..."
-for sample in "${SAMPLES[@]}"; do
-    echo "eggNOG annotation for sample: $sample"
-    
-    # Process protein files from Prokka
-    for prokka_dir in ${RESULTS_DIR}/prokka/${sample}_*; do
+
+# Process protein files from Prokka for all bins
+if [ -d "${RESULTS_DIR}/prokka" ]; then
+    for prokka_dir in ${RESULTS_DIR}/prokka/*; do
         if [ -d "$prokka_dir" ]; then
             bin_name=$(basename "$prokka_dir")
             protein_file="$prokka_dir/${bin_name}.faa"
@@ -114,59 +138,90 @@ for sample in "${SAMPLES[@]}"; do
             if [ -f "$protein_file" ]; then
                 echo "  Processing proteins for: $bin_name"
                 
-                emapper.py -i "$protein_file" \
-                          --output ${bin_name}_eggnog \
-                          --output_dir ${RESULTS_DIR}/eggnog \
-                          --cpu ${THREADS} \
-                          --override
+                # Check if eggNOG-mapper is available
+                if command -v emapper.py &> /dev/null; then
+                    emapper.py -i "$protein_file" \
+                              --output ${bin_name}_eggnog \
+                              --output_dir ${RESULTS_DIR}/eggnog \
+                              --cpu ${THREADS} \
+                              --override
+                else
+                    echo "⚠ Warning: eggNOG-mapper not found, skipping functional annotation"
+                    echo "You can install eggNOG-mapper with: conda install -c bioconda eggnog-mapper"
+                    mkdir -p ${RESULTS_DIR}/eggnog
+                    echo "Skipping eggNOG due to missing installation" > ${RESULTS_DIR}/eggnog/SKIPPED.txt
+                    break
+                fi
+            else
+                echo "  No protein file found for: $bin_name"
             fi
         fi
     done
-done
+else
+    echo "No Prokka results found, skipping eggNOG annotation"
+fi
 
 # Step 4: Generate summary report
 echo "Generating summary report..."
 cat > ${RESULTS_DIR}/summary/analysis_summary.md << 'EOF'
-# MAG Analysis Summary
+# MAG Analysis Summary - Co-Assembly Approach
 
 ## Overview
-This report summarizes the results of metagenomic assembly, binning, and annotation.
+This report summarizes the results of metagenomic co-assembly, binning, and annotation.
+The analysis used a co-assembly approach with differential coverage binning.
 
 ## Quality Metrics
 - **High-quality MAGs**: >90% completeness, <5% contamination
-- **Medium-quality MAGs**: >50% completeness, <10% contamination
+- **Medium-quality MAGs**: >50% completeness, <10% contamination  
 - **Low-quality MAGs**: <50% completeness or >10% contamination
 
-## Key Findings
+## Co-Assembly Results
 
-### Sample Summary
+### Binning Summary
 EOF
 
-# Add CheckM results to summary
-for sample in "${SAMPLES[@]}"; do
-    echo "### Sample: $sample" >> ${RESULTS_DIR}/summary/analysis_summary.md
-    
-    # Add DAS Tool quality if available
-    if [ -f "${BINNING_DIR}/checkm/${sample}_dastool_quality.txt" ]; then
-        echo "#### DAS Tool Bins Quality:" >> ${RESULTS_DIR}/summary/analysis_summary.md
-        echo '```' >> ${RESULTS_DIR}/summary/analysis_summary.md
-        head -20 "${BINNING_DIR}/checkm/${sample}_dastool_quality.txt" >> ${RESULTS_DIR}/summary/analysis_summary.md
-        echo '```' >> ${RESULTS_DIR}/summary/analysis_summary.md
-    fi
-    
-    # Add MetaBAT2 quality if available
-    if [ -f "${BINNING_DIR}/checkm/${sample}_metabat2_quality.txt" ]; then
-        echo "#### MetaBAT2 Bins Quality:" >> ${RESULTS_DIR}/summary/analysis_summary.md
-        echo '```' >> ${RESULTS_DIR}/summary/analysis_summary.md
-        head -20 "${BINNING_DIR}/checkm/${sample}_metabat2_quality.txt" >> ${RESULTS_DIR}/summary/analysis_summary.md
-        echo '```' >> ${RESULTS_DIR}/summary/analysis_summary.md
-    fi
-    
-    echo "" >> ${RESULTS_DIR}/summary/analysis_summary.md
-done
+# Add MetaBAT2 bin count
+if [ -d "${BINNING_DIR}/metabat2" ]; then
+    bin_count=$(ls ${BINNING_DIR}/metabat2/coassembly_bin.*.fa 2>/dev/null | wc -l)
+    echo "- **MetaBAT2 bins**: $bin_count" >> ${RESULTS_DIR}/summary/analysis_summary.md
+fi
+
+# Add DAS Tool bin count if available
+if [ -d "${BINNING_DIR}/das_tool/coassembly_DASToolBins_DASTool_bins" ]; then
+    dastool_bin_count=$(ls ${BINNING_DIR}/das_tool/coassembly_DASToolBins_DASTool_bins/*.fa 2>/dev/null | wc -l)
+    echo "- **DAS Tool integrated bins**: $dastool_bin_count" >> ${RESULTS_DIR}/summary/analysis_summary.md
+fi
+
+# Add CheckM results to summary if available
+echo "" >> ${RESULTS_DIR}/summary/analysis_summary.md
+echo "### Quality Assessment" >> ${RESULTS_DIR}/summary/analysis_summary.md
+
+if [ -f "${BINNING_DIR}/checkm/metabat2_quality.txt" ]; then
+    echo "#### MetaBAT2 Bins Quality:" >> ${RESULTS_DIR}/summary/analysis_summary.md
+    echo '```' >> ${RESULTS_DIR}/summary/analysis_summary.md
+    cat "${BINNING_DIR}/checkm/metabat2_quality.txt" >> ${RESULTS_DIR}/summary/analysis_summary.md
+    echo '```' >> ${RESULTS_DIR}/summary/analysis_summary.md
+fi
+
+if [ -f "${BINNING_DIR}/checkm/dastool_quality.txt" ]; then
+    echo "#### DAS Tool Bins Quality:" >> ${RESULTS_DIR}/summary/analysis_summary.md
+    echo '```' >> ${RESULTS_DIR}/summary/analysis_summary.md
+    cat "${BINNING_DIR}/checkm/dastool_quality.txt" >> ${RESULTS_DIR}/summary/analysis_summary.md
+    echo '```' >> ${RESULTS_DIR}/summary/analysis_summary.md
+fi
+
+# Add basic bin statistics
+echo "" >> ${RESULTS_DIR}/summary/analysis_summary.md
+echo "### Bin Statistics" >> ${RESULTS_DIR}/summary/analysis_summary.md
+
+if [ -f "${WORK_DIR}/code/analyze_bins.py" ]; then
+    echo "Running bin analysis for summary..."
+    python3 "${WORK_DIR}/code/analyze_bins.py" >> ${RESULTS_DIR}/summary/analysis_summary.md 2>/dev/null || echo "Basic bin analysis not available" >> ${RESULTS_DIR}/summary/analysis_summary.md
+fi
 
 # Add GTDB-Tk results to summary
 if [ -f "${RESULTS_DIR}/gtdbtk/output/gtdbtk.bac120.summary.tsv" ]; then
+    echo "" >> ${RESULTS_DIR}/summary/analysis_summary.md
     echo "## Taxonomic Classification (GTDB-Tk)" >> ${RESULTS_DIR}/summary/analysis_summary.md
     echo '```' >> ${RESULTS_DIR}/summary/analysis_summary.md
     cat "${RESULTS_DIR}/gtdbtk/output/gtdbtk.bac120.summary.tsv" >> ${RESULTS_DIR}/summary/analysis_summary.md
