@@ -26,14 +26,45 @@ Total dataset: ~6.7GB of paired-end sequencing data
 
 ```bash
 # 1. Setup conda environments
-./scripts/run_pipeline.sh setup
+./code/00_environment_setup.sh
 
-# 2. Run complete pipeline
-./scripts/run_pipeline.sh all
+# 2. Check environment health
+./code/environment_health_check.sh
 
-# 3. View results
+# 3. Fix any issues (if needed)
+conda activate maxbin2_env
+./code/fix_maxbin2.sh
+
+# 4. Run complete pipeline
+./code/run_pipeline.sh
+
+# 5. View results
 firefox results/01_qc/multiqc/multiqc_report.html
 ```
+
+## Environment Management
+
+This pipeline uses multiple conda environments to avoid dependency conflicts:
+
+- `metagenome_assembly` - BWA, samtools for assembly and host removal
+- `metagenome_binning` - MetaBAT2, VAMB, depth calculation tools
+- `maxbin2_env` - MaxBin2 with custom wrapper for compatibility
+- `dastool_env` - DAS Tool and R for bin optimization  
+- `checkm_env` - CheckM and prodigal for quality assessment
+
+### Environment Health Check
+```bash
+./code/environment_health_check.sh
+```
+This script checks all environments and reports their status:
+- 🟢 PERFECT (100%) - All tools working
+- 🟡 GOOD (80-99%) - Minor issues, mostly functional  
+- 🔴 NEEDS ATTENTION (<80%) - Significant problems
+
+### Common Fixes
+- **MaxBin2 issues**: `./code/fix_maxbin2.sh` (creates missing run_MaxBin.pl wrapper)
+- **Missing packages**: `conda install -n ENV_NAME -c bioconda PACKAGE`
+- **Environment recreation**: `conda env remove -n ENV_NAME && ./code/00_environment_setup.sh`
 
 ## Pipeline Overview
 

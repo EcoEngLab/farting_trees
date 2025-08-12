@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Metagenomic binning using MetaBAT2, MaxBin2, and VAMB on co-assembly
+# Resumable Metagenomic Binning Pipeline
+# This script allows you to run individual steps or resume from a specific step
 # Author: Generated for farting_trees project
-# Date: July 2025
+# Date: August 2025
 
 set -e
 
@@ -13,666 +14,525 @@ RESULTS_DIR="${WORK_DIR}/results/04_binning"
 THREADS=8
 COASSEMBLY_FASTA="${ASSEMBLY_DIR}/megahit/coassembly_contigs.fa"
 
-# Activate required environments
+# Initialize conda
 source $(conda info --base)/etc/profile.d/conda.sh
 
-# BWA and samtools are in assembly environment
-conda activate metagenome_assembly
+# Usage function
+usage() {
+    echo "Usage: $0 [STEP]"
+    echo ""
+    echo "Available steps:"
+    echo "  prep     - Prepare input data (depth file)"
+    echo "  metabat  - Run MetaBAT2 binning"
+    echo "  maxbin   - Run MaxBin2 binning"
+    echo "  vamb     - Run VAMB binning"
+    echo "  dastool  - Run DAS Tool optimization"
+    echo "  checkm   - Run CheckM quality assessment"
+    echo "  extract  - Extract high-quality bins"
+    echo "  all      - Run all steps (default)"
+    echo ""
+    echo "Example:"
+    echo "  $0 vamb     # Run only VAMB step"
+    echo "  $0 all      # Run all steps"
+    echo ""
+    exit 1
+}
 
-echo "Starting metagenomic binning with differential coverage analysis..."
-echo "Co-assembly file: $COASSEMBLY_FASTA"
-echo "Strategy: Map each sample individually to co-assembly for differential coverage"
+# Get step from command line argument
+STEP=${1:-all}
+
+echo "==============================================================="
+echo "RESUMABLE METAGENOMIC BINNING PIPELINE"
+echo "==============================================================="
+echo "Running step: $STEP"
+echo "Co-assembly: $COASSEMBLY_FASTA"
+echo "Results: $RESULTS_DIR"
+echo ""
 
 # Create output directories
-mkdir -p ${RESULTS_DIR}/{metabat2,maxbin2,vamb,das_tool,checkm}
+mkdir -p ${RESULTS_DIR}/{metabat2,maxbin2,vamb,dastool,checkm,final_bins}
 
-# Step 1: Map each sample to co-assembly for differential coverage
-echo "Mapping each sample to co-assembly for differential coverage analysis..."
-
-# Sample list
-SAMPLES=("53394_A15" "53395_A16" "53396_B6" "53397_B10" "53398_A16S" "53399_B10S")
-
-# Check if BWA index exists
-if [ ! -f "${COASSEMBLY_FASTA}.bwt" ]; then
-    echo "Creating BWA index for co-assembly..."
-    conda activate metagenome_assembly
-    bwa index ${COASSEMBLY_FASTA}
-fi
-
-# Map each sample individually to co-assembly
-for sample in "${SAMPLES[@]}"; do
-    echo "Mapping sample: $sample to co-assembly"
+# Step functions
+prep_data() {
+    echo "STEP 1: Preparing input data..."
     
-    # Define input and output files
-    R1="${WORK_DIR}/results/02_host_removal/clean_reads/${sample}_R1_clean.fastq.gz"
-    R2="${WORK_DIR}/results/02_host_removal/clean_reads/${sample}_R2_clean.fastq.gz"
-    output_bam="${RESULTS_DIR}/${sample}_coassembly_sorted.bam"
-    
-    # Check if files exist
-    if [ ! -f "$R1" ] || [ ! -f "$R2" ]; then
-        echo "⚠ Warning: Missing files for $sample, skipping..."
-        echo "  Expected: $R1"
-        echo "  Expected: $R2"
-        continue
-    fi
-    
-    # Skip if BAM already exists and is not empty
-    if [ -f "$output_bam" ] && [ -s "$output_bam" ]; then
-        echo "✓ BAM file already exists for $sample: $output_bam"
-        continue
-    fi
-    
-    echo "  Aligning $sample to co-assembly..."
-    conda activate metagenome_assembly
-    bwa mem -t ${THREADS} \
-            ${COASSEMBLY_FASTA} \
-            $R1 $R2 | \
-    samtools view -@ ${THREADS} -bS -F 4 - | \
-    samtools sort -@ ${THREADS} -o $output_bam
-    
-    # Index the BAM file
-    samtools index $output_bam
-    
-    echo "✓ Completed mapping for $sample"
-done
-
-# Step 2: Generate depth file using all individual BAM files
-echo "Generating differential coverage depth file..."
-BAM_FILES="${RESULTS_DIR}/*_coassembly_sorted.bam"
-
-# Check if we have BAM files
-if ! ls ${RESULTS_DIR}/*_coassembly_sorted.bam 1> /dev/null 2>&1; then
-    echo "✗ No individual sample BAM files found!"
-    echo "Expected pattern: ${RESULTS_DIR}/*_coassembly_sorted.bam"
-    exit 1
-fi
-
-echo "Found BAM files:"
-ls -la ${RESULTS_DIR}/*_coassembly_sorted.bam
-
-# Switch to binning environment for jgi_summarize_bam_contig_depths
-conda activate metagenome_binning
-jgi_summarize_bam_contig_depths --outputDepth ${RESULTS_DIR}/coassembly_depth.txt \
-                               ${RESULTS_DIR}/*_coassembly_sorted.bam
-
-# Step 2: MetaBAT2 binning on co-assembly (RELAXED PARAMETERS FOR METHANE GENES)
-echo "Running MetaBAT2 binning on co-assembly with relaxed parameters..."
-echo "Using more inclusive settings to capture methane-containing contigs..."
-
-# Standard binning (original)
-echo "  Running standard MetaBAT2 binning..."
-metabat2 -i ${COASSEMBLY_FASTA} \
-         -a ${RESULTS_DIR}/coassembly_depth.txt \
-         -o ${RESULTS_DIR}/metabat2/coassembly_bin \
-         --minContig 2500 \
-         --numThreads ${THREADS}
-
-# Relaxed binning for methane genes (lower thresholds)
-echo "  Running relaxed MetaBAT2 binning for methane genes..."
-metabat2 -i ${COASSEMBLY_FASTA} \
-         -a ${RESULTS_DIR}/coassembly_depth.txt \
-         -o ${RESULTS_DIR}/metabat2/relaxed_bin \
-         --minContig 1500 \
-         --minClsSize 200000 \
-         --maxP 95 \
-         --minS 60 \
-         --maxEdges 200 \
-         --pTNF 0 \
-         --noAdd \
-         --numThreads ${THREADS}
-
-# Very inclusive binning (catch remaining contigs)
-echo "  Running very inclusive MetaBAT2 binning..."
-metabat2 -i ${COASSEMBLY_FASTA} \
-         -a ${RESULTS_DIR}/coassembly_depth.txt \
-         -o ${RESULTS_DIR}/metabat2/inclusive_bin \
-         --minContig 1500 \
-         --minClsSize 100000 \
-         --maxP 90 \
-         --minS 40 \
-         --maxEdges 500 \
-         --pTNF 0 \
-         --noAdd \
-         --numThreads ${THREADS}
-
-# Step 3: MaxBin2 binning with differential coverage (RELAXED PARAMETERS)
-echo "Running MaxBin2 binning with relaxed parameters for better coverage..."
-
-# Check if MaxBin2 is available
-if ! command -v run_MaxBin.pl &> /dev/null; then
-    echo "⚠ Warning: MaxBin2 (run_MaxBin.pl) not found, skipping MaxBin2 binning"
-    echo "You can install MaxBin2 later with: conda install -c bioconda maxbin2"
-    mkdir -p ${RESULTS_DIR}/maxbin2
-    echo "Skipping MaxBin2 due to missing installation" > ${RESULTS_DIR}/maxbin2/SKIPPED.txt
-else
-    # MaxBin2 prefers multiple abundance files for better binning
-    # Create abundance files from depth data (columns 4, 6, 8, 10, 12, 14 are sample depths)
-    echo "Creating abundance files for MaxBin2..."
-
-    # Extract sample-specific abundance columns
-    # Assuming depth file format: contig | length | totalAvgDepth | sample1.var | sample1 | sample2.var | sample2 | ...
-    ABUND_FILES=""
-    SAMPLE_COUNT=0
-
-    # Count samples and create abundance files
-    for i in $(seq 4 2 20); do  # Check columns 4, 6, 8, 10, 12, 14 (up to 6 samples)
-        col_data=$(cut -f${i} ${RESULTS_DIR}/coassembly_depth.txt | head -20 | tail -10)
-        if [[ -n "$col_data" ]] && [[ "$col_data" != *"0.0000"* ]]; then
-            SAMPLE_COUNT=$((SAMPLE_COUNT + 1))
-            cut -f1,${i} ${RESULTS_DIR}/coassembly_depth.txt > ${RESULTS_DIR}/coassembly_abundance_sample${SAMPLE_COUNT}.txt
-            ABUND_FILES="${ABUND_FILES} -abund ${RESULTS_DIR}/coassembly_abundance_sample${SAMPLE_COUNT}.txt"
+    # Check if depth file exists
+    DEPTH_FILE="${RESULTS_DIR}/coassembly_depth.txt"
+    if [ ! -f "$DEPTH_FILE" ]; then
+        echo "  Generating differential coverage depth file..."
+        conda activate metagenome_assembly
+        
+        # Check for BAM files
+        if ! ls ${RESULTS_DIR}/*_coassembly_sorted.bam 1> /dev/null 2>&1; then
+            echo "  ERROR: No BAM files found! Run read mapping first."
+            echo "  Expected: ${RESULTS_DIR}/*_coassembly_sorted.bam"
+            exit 1
         fi
-    done
-
-    echo "Found $SAMPLE_COUNT samples for MaxBin2 differential coverage"
-
-    # Standard MaxBin2 run
-    echo "  Running standard MaxBin2..."
-    run_MaxBin.pl -contig ${COASSEMBLY_FASTA} \
-                  ${ABUND_FILES} \
-                  -out ${RESULTS_DIR}/maxbin2/coassembly_bin \
-                  -thread ${THREADS} \
-                  -min_contig_length 2500
-
-    # Relaxed MaxBin2 run for more contigs
-    echo "  Running relaxed MaxBin2 for methane genes..."
-    run_MaxBin.pl -contig ${COASSEMBLY_FASTA} \
-                  ${ABUND_FILES} \
-                  -out ${RESULTS_DIR}/maxbin2/relaxed_bin \
-                  -thread ${THREADS} \
-                  -min_contig_length 1000 \
-                  -prob_threshold 0.7 \
-                  -markerset 40
-fi
-
-# Step 4: VAMB binning with differential coverage (MULTIPLE RUNS)
-echo "Running VAMB binning with multiple parameter sets..."
-
-# Check if VAMB is available
-if ! command -v vamb &> /dev/null; then
-    echo "⚠ Warning: VAMB not found, skipping VAMB binning"
-    echo "You can install VAMB later with: conda install -c bioconda vamb"
-    mkdir -p ${RESULTS_DIR}/vamb
-    echo "Skipping VAMB due to missing installation" > ${RESULTS_DIR}/vamb/SKIPPED.txt
-else
-    # Standard VAMB run
-    echo "  Running standard VAMB..."
-    vamb --outdir ${RESULTS_DIR}/vamb/standard \
-         --fasta ${COASSEMBLY_FASTA} \
-         --bamfiles ${RESULTS_DIR}/*_coassembly_sorted.bam \
-         --mincontig 2500 \
-         --minfasta 200000
-
-    # Relaxed VAMB run for methane genes
-    echo "  Running relaxed VAMB for methane genes..."
-    vamb --outdir ${RESULTS_DIR}/vamb/relaxed \
-         --fasta ${COASSEMBLY_FASTA} \
-         --bamfiles ${RESULTS_DIR}/*_coassembly_sorted.bam \
-         --mincontig 1000 \
-         --minfasta 100000 \
-         --alpha 0.1 \
-         --beta 0.1
-
-    # Very inclusive VAMB run 
-    echo "  Running very inclusive VAMB..."
-    vamb --outdir ${RESULTS_DIR}/vamb/inclusive \
-         --fasta ${COASSEMBLY_FASTA} \
-         --bamfiles ${RESULTS_DIR}/*_coassembly_sorted.bam \
-         --mincontig 1000 \
-         --minfasta 50000 \
-         --alpha 0.05 \
-         --beta 0.05
-fi
-
-# Step 4.5: TARGETED METHANE CONTIG BINNING
-echo "Running targeted binning on methane-containing contigs..."
-
-# Check if we have previously identified methane contigs
-METHANE_CONTIGS_FILE="${WORK_DIR}/results/10_methane_contig_extraction/all_methane_contigs.fa"
-
-if [ -f "$METHANE_CONTIGS_FILE" ]; then
-    echo "Found previously identified methane contigs: $METHANE_CONTIGS_FILE"
-    
-    # Create targeted methane bin directory
-    mkdir -p ${RESULTS_DIR}/methane_targeted
-    
-    # Run MetaBAT2 specifically on methane contigs with very relaxed parameters
-    echo "  Running targeted MetaBAT2 on methane contigs..."
-    metabat2 -i ${METHANE_CONTIGS_FILE} \
-             -a ${RESULTS_DIR}/coassembly_depth.txt \
-             -o ${RESULTS_DIR}/methane_targeted/methane_bin \
-             --minContig 1500 \
-             --minClsSize 50000 \
-             --maxP 85 \
-             --minS 30 \
-             --maxEdges 1000 \
-             --pTNF 0 \
-             --noAdd \
-             --numThreads ${THREADS}
-    
-    # Create separate bins for mcrA and pmoA contigs if available
-    MCRA_CONTIGS="${WORK_DIR}/results/10_methane_contig_extraction/mcrA_containing_contigs.fa"
-    PMOA_CONTIGS="${WORK_DIR}/results/10_methane_contig_extraction/pmoA_containing_contigs.fa"
-    
-    if [ -f "$MCRA_CONTIGS" ]; then
-        echo "  Creating mcrA-specific bin..."
-        cp "$MCRA_CONTIGS" "${RESULTS_DIR}/methane_targeted/mcrA_contigs.fa"
         
-        # Try to bin mcrA contigs separately
-        metabat2 -i ${MCRA_CONTIGS} \
-                 -a ${RESULTS_DIR}/coassembly_depth.txt \
-                 -o ${RESULTS_DIR}/methane_targeted/mcrA_bin \
-                 --minContig 1500 \
-                 --minClsSize 30000 \
-                 --maxP 80 \
-                 --minS 25 \
-                 --numThreads ${THREADS}
-    fi
-    
-    if [ -f "$PMOA_CONTIGS" ]; then
-        echo "  Creating pmoA-specific bin..."
-        cp "$PMOA_CONTIGS" "${RESULTS_DIR}/methane_targeted/pmoA_contigs.fa"
+        echo "  Found BAM files:"
+        ls -la ${RESULTS_DIR}/*_coassembly_sorted.bam
         
-        # Try to bin pmoA contigs separately
-        metabat2 -i ${PMOA_CONTIGS} \
-                 -a ${RESULTS_DIR}/coassembly_depth.txt \
-                 -o ${RESULTS_DIR}/methane_targeted/pmoA_bin \
-                 --minContig 1500 \
-                 --minClsSize 30000 \
-                 --maxP 80 \
-                 --minS 25 \
-                 --numThreads ${THREADS}
-    fi
-    
-else
-    echo "No previously identified methane contigs found."
-    echo "Run the methane detection scripts first:"
-    echo "  ./code/09_simple_assembly_search.sh"
-    echo "  ./code/10_extract_methane_contigs.sh"
-fi
-
-# Step 5: Additional aggressive binning for unbinned contigs
-echo "Running aggressive binning on remaining unbinned contigs..."
-
-# Create a list of all binned contigs so far
-ALL_BINNED_CONTIGS="${RESULTS_DIR}/all_binned_contigs.txt"
-find ${RESULTS_DIR} -name "*.fa" -o -name "*.fasta" -o -name "*.fna" | \
-    xargs grep "^>" | sed 's/.*>//' | sed 's/ .*//' | sort -u > $ALL_BINNED_CONTIGS
-
-# Extract unbinned contigs for another round of binning
-UNBINNED_CONTIGS="${RESULTS_DIR}/unbinned_contigs.fa"
-echo "  Extracting unbinned contigs..."
-
-python3 -c "
-import sys
-from Bio import SeqIO
-
-# Read list of binned contigs
-try:
-    with open('$ALL_BINNED_CONTIGS', 'r') as f:
-        binned = set(line.strip() for line in f)
-except:
-    binned = set()
-
-# Extract unbinned sequences
-unbinned_count = 0
-with open('$UNBINNED_CONTIGS', 'w') as out:
-    for record in SeqIO.parse('$COASSEMBLY_FASTA', 'fasta'):
-        if record.id not in binned:
-            SeqIO.write(record, out, 'fasta')
-            unbinned_count += 1
-
-print(f'Extracted {unbinned_count} unbinned contigs')
-" 2>/dev/null || echo "Python extraction failed, using alternative method"
-
-# Alternative method if Python fails
-if [ ! -f "$UNBINNED_CONTIGS" ] || [ ! -s "$UNBINNED_CONTIGS" ]; then
-    echo "  Using alternative unbinned contig extraction..."
-    grep "^>" ${COASSEMBLY_FASTA} | sed 's/>//' | sed 's/ .*//' | sort > ${RESULTS_DIR}/all_contigs.txt
-    comm -23 ${RESULTS_DIR}/all_contigs.txt $ALL_BINNED_CONTIGS > ${RESULTS_DIR}/unbinned_contig_ids.txt
-    
-    # Extract sequences (simplified approach)
-    awk 'BEGIN{while((getline line < "'${RESULTS_DIR}'/unbinned_contig_ids.txt") > 0) wanted[line]=1}
-         /^>/{id=substr($0,2); gsub(/ .*/,"",id); print_seq=(id in wanted)}
-         print_seq' ${COASSEMBLY_FASTA} > $UNBINNED_CONTIGS
-fi
-
-# Check if we have unbinned contigs to work with
-if [ -f "$UNBINNED_CONTIGS" ] && [ -s "$UNBINNED_CONTIGS" ]; then
-    unbinned_count=$(grep -c "^>" $UNBINNED_CONTIGS)
-    echo "  Found $unbinned_count unbinned contigs"
-    
-    if [ $unbinned_count -gt 100 ]; then
-        echo "  Running final aggressive MetaBAT2 on unbinned contigs..."
-        metabat2 -i ${UNBINNED_CONTIGS} \
-                 -a ${RESULTS_DIR}/coassembly_depth.txt \
-                 -o ${RESULTS_DIR}/metabat2/final_bin \
-                 --minContig 1500 \
-                 --minClsSize 20000 \
-                 --maxP 75 \
-                 --minS 20 \
-                 --maxEdges 2000 \
-                 --pTNF 0 \
-                 --noAdd \
-                 --numThreads ${THREADS}
-    fi
-else
-    echo "  No unbinned contigs found or extraction failed"
-fi
-# Step 6: DAS Tool for bin optimization (COMPREHENSIVE)
-echo "Running DAS Tool for comprehensive bin optimization..."
-
-mkdir -p ${RESULTS_DIR}/das_tool
-
-# Prepare bin-to-contig files for all MetaBAT2 runs
-echo "Preparing all MetaBAT2 bins for DAS Tool..."
-cd ${RESULTS_DIR}
-
-# Standard MetaBAT2 bins
-if ls metabat2/coassembly_bin*.fa 1> /dev/null 2>&1; then
-    for bin in metabat2/coassembly_bin*.fa; do
-        bin_name=$(basename $bin .fa)
-        grep "^>" $bin | sed 's/>//' | awk -v bin="$bin_name" '{print $1"\t"bin}' 
-    done > ${RESULTS_DIR}/das_tool/metabat2_standard_scaffolds2bin.txt
-else
-    touch ${RESULTS_DIR}/das_tool/metabat2_standard_scaffolds2bin.txt
-fi
-
-# Relaxed MetaBAT2 bins
-if ls metabat2/relaxed_bin*.fa 1> /dev/null 2>&1; then
-    for bin in metabat2/relaxed_bin*.fa; do
-        bin_name=$(basename $bin .fa)
-        grep "^>" $bin | sed 's/>//' | awk -v bin="metabat2_relaxed_$bin_name" '{print $1"\t"bin}' 
-    done > ${RESULTS_DIR}/das_tool/metabat2_relaxed_scaffolds2bin.txt
-else
-    touch ${RESULTS_DIR}/das_tool/metabat2_relaxed_scaffolds2bin.txt
-fi
-
-# Inclusive MetaBAT2 bins
-if ls metabat2/inclusive_bin*.fa 1> /dev/null 2>&1; then
-    for bin in metabat2/inclusive_bin*.fa; do
-        bin_name=$(basename $bin .fa)
-        grep "^>" $bin | sed 's/>//' | awk -v bin="metabat2_inclusive_$bin_name" '{print $1"\t"bin}' 
-    done > ${RESULTS_DIR}/das_tool/metabat2_inclusive_scaffolds2bin.txt
-else
-    touch ${RESULTS_DIR}/das_tool/metabat2_inclusive_scaffolds2bin.txt
-fi
-
-# Final aggressive MetaBAT2 bins
-if ls metabat2/final_bin*.fa 1> /dev/null 2>&1; then
-    for bin in metabat2/final_bin*.fa; do
-        bin_name=$(basename $bin .fa)
-        grep "^>" $bin | sed 's/>//' | awk -v bin="metabat2_final_$bin_name" '{print $1"\t"bin}' 
-    done > ${RESULTS_DIR}/das_tool/metabat2_final_scaffolds2bin.txt
-else
-    touch ${RESULTS_DIR}/das_tool/metabat2_final_scaffolds2bin.txt
-fi
-
-# Methane-targeted bins
-if ls methane_targeted/*.fa 1> /dev/null 2>&1; then
-    for bin in methane_targeted/*.fa; do
-        bin_name=$(basename $bin .fa)
-        grep "^>" $bin | sed 's/>//' | awk -v bin="methane_$bin_name" '{print $1"\t"bin}' 
-    done > ${RESULTS_DIR}/das_tool/methane_targeted_scaffolds2bin.txt
-else
-    touch ${RESULTS_DIR}/das_tool/methane_targeted_scaffolds2bin.txt
-fi
-
-# Combine all MetaBAT2 results
-cat ${RESULTS_DIR}/das_tool/metabat2_*_scaffolds2bin.txt > ${RESULTS_DIR}/das_tool/metabat2_all_scaffolds2bin.txt
-
-# Prepare bin-to-contig files for all MaxBin2 runs
-echo "Preparing all MaxBin2 bins for DAS Tool..."
-if ls maxbin2/coassembly_bin*.fasta 1> /dev/null 2>&1; then
-    for bin in maxbin2/coassembly_bin*.fasta; do
-        bin_name=$(basename $bin .fasta)
-        grep "^>" $bin | sed 's/>//' | awk -v bin="maxbin2_standard_$bin_name" '{print $1"\t"bin}'
-    done > ${RESULTS_DIR}/das_tool/maxbin2_standard_scaffolds2bin.txt
-else
-    touch ${RESULTS_DIR}/das_tool/maxbin2_standard_scaffolds2bin.txt
-fi
-
-if ls maxbin2/relaxed_bin*.fasta 1> /dev/null 2>&1; then
-    for bin in maxbin2/relaxed_bin*.fasta; do
-        bin_name=$(basename $bin .fasta)
-        grep "^>" $bin | sed 's/>//' | awk -v bin="maxbin2_relaxed_$bin_name" '{print $1"\t"bin}'
-    done > ${RESULTS_DIR}/das_tool/maxbin2_relaxed_scaffolds2bin.txt
-else
-    touch ${RESULTS_DIR}/das_tool/maxbin2_relaxed_scaffolds2bin.txt
-fi
-
-cat ${RESULTS_DIR}/das_tool/maxbin2_*_scaffolds2bin.txt > ${RESULTS_DIR}/das_tool/maxbin2_all_scaffolds2bin.txt
-
-# Prepare bin-to-contig files for all VAMB runs
-echo "Preparing all VAMB bins for DAS Tool..."
-for vamb_dir in vamb/standard vamb/relaxed vamb/inclusive; do
-    if [ -d "$vamb_dir" ] && ls ${vamb_dir}/*.fna 1> /dev/null 2>&1; then
-        vamb_type=$(basename $vamb_dir)
-        for bin in ${vamb_dir}/*.fna; do
-            bin_name=$(basename $bin .fna)
-            grep "^>" $bin | sed 's/>//' | awk -v bin="vamb_${vamb_type}_$bin_name" '{print $1"\t"bin}'
-        done > ${RESULTS_DIR}/das_tool/vamb_${vamb_type}_scaffolds2bin.txt
+        conda activate metagenome_binning
+        jgi_summarize_bam_contig_depths --outputDepth ${DEPTH_FILE} \
+                                       ${RESULTS_DIR}/*_coassembly_sorted.bam
     else
-        touch ${RESULTS_DIR}/das_tool/vamb_${vamb_type}_scaffolds2bin.txt
+        echo "  ✓ Depth file exists: $DEPTH_FILE"
     fi
-done
-
-cat ${RESULTS_DIR}/das_tool/vamb_*_scaffolds2bin.txt > ${RESULTS_DIR}/das_tool/vamb_all_scaffolds2bin.txt
-
-# Run DAS Tool (only if we have bins from at least one method)
-if [ -s "${RESULTS_DIR}/das_tool/metabat2_all_scaffolds2bin.txt" ] || [ -s "${RESULTS_DIR}/das_tool/maxbin2_all_scaffolds2bin.txt" ] || [ -s "${RESULTS_DIR}/das_tool/vamb_all_scaffolds2bin.txt" ]; then
-    echo "Running comprehensive DAS Tool integration..."
     
-    # Check if DAS Tool is available
-    if ! command -v DAS_Tool &> /dev/null; then
-        echo "⚠ Warning: DAS Tool not found, skipping bin integration"
-        echo "You can install DAS Tool later with: conda install -c bioconda das_tool"
-        echo "Skipping DAS Tool due to missing installation" > ${RESULTS_DIR}/das_tool/SKIPPED.txt
+    echo "  ✓ Input data ready: assembly.fa + depth.txt"
+}
+
+run_metabat2() {
+    echo "STEP 2.1: Running MetaBAT2 binning..."
+    conda activate metagenome_binning
+    
+    # Check if MetaBAT2 already completed successfully
+    if [ -d "${RESULTS_DIR}/metabat2" ] && [ $(ls ${RESULTS_DIR}/metabat2/bin*.fa 2>/dev/null | wc -l) -gt 0 ]; then
+        METABAT2_BINS=$(ls ${RESULTS_DIR}/metabat2/bin*.fa 2>/dev/null | wc -l)
+        echo "  ✓ MetaBAT2 already completed: $METABAT2_BINS bins found, skipping..."
     else
-        # Prepare input file list
-        input_files=""
-        labels=""
-        
-        if [ -s "${RESULTS_DIR}/das_tool/metabat2_all_scaffolds2bin.txt" ]; then
-            input_files="${input_files}${RESULTS_DIR}/das_tool/metabat2_all_scaffolds2bin.txt,"
-            labels="${labels}metabat2_all,"
-        fi
-        
-        if [ -s "${RESULTS_DIR}/das_tool/maxbin2_all_scaffolds2bin.txt" ]; then
-            input_files="${input_files}${RESULTS_DIR}/das_tool/maxbin2_all_scaffolds2bin.txt,"
-            labels="${labels}maxbin2_all,"
-        fi
-        
-        if [ -s "${RESULTS_DIR}/das_tool/vamb_all_scaffolds2bin.txt" ]; then
-            input_files="${input_files}${RESULTS_DIR}/das_tool/vamb_all_scaffolds2bin.txt,"
-            labels="${labels}vamb_all,"
-        fi
-        
-        if [ -s "${RESULTS_DIR}/das_tool/methane_targeted_scaffolds2bin.txt" ]; then
-            input_files="${input_files}${RESULTS_DIR}/das_tool/methane_targeted_scaffolds2bin.txt,"
-            labels="${labels}methane_targeted,"
-        fi
-        
-        # Remove trailing commas
-        input_files=${input_files%,}
-        labels=${labels%,}
-        
-        echo "DAS Tool input files: $input_files"
-        echo "DAS Tool labels: $labels"
-        
-        DAS_Tool -i $input_files \
-                 -l $labels \
-                 -c ${COASSEMBLY_FASTA} \
-                 -o ${RESULTS_DIR}/das_tool/comprehensive_DASToolBins \
-                 --threads ${THREADS} \
-                 --write_bins 1 \
-                 --score_threshold 0.3
+        echo "  Running MetaBAT2 with standard parameters..."
+        metabat2 -i ${COASSEMBLY_FASTA} \
+                 -a ${RESULTS_DIR}/coassembly_depth.txt \
+                 -o ${RESULTS_DIR}/metabat2/bin \
+                 --minContig 2500 \
+                 --numThreads ${THREADS}
+
+        METABAT2_BINS=$(ls ${RESULTS_DIR}/metabat2/bin*.fa 2>/dev/null | wc -l)
+        echo "  ✓ MetaBAT2 completed: $METABAT2_BINS bins generated"
     fi
-else
-    echo "No bins found for DAS Tool integration"
-fi
+}
 
-# Step 7: Comprehensive bin quality assessment with CheckM
-echo "Running comprehensive CheckM for all bin quality assessment..."
-
-# Check if CheckM is available - use dedicated checkm_env
-echo "Checking CheckM availability in dedicated environment..."
-if conda activate checkm_env && command -v checkm &> /dev/null; then
-    echo "✅ CheckM found in checkm_env, proceeding with quality assessment..."
-    CHECKM_CMD="conda activate checkm_env && checkm"
-elif command -v checkm &> /dev/null; then
-    echo "✅ CheckM found in current environment, proceeding with quality assessment..."
-    CHECKM_CMD="checkm"
-else
-    echo "⚠ Warning: CheckM not found in any environment, skipping quality assessment"
-    echo "You can install CheckM later with: conda install -c bioconda checkm-genome"
-    echo "For now, using basic bin statistics instead..."
-    echo "Skipping CheckM due to missing installation" > ${RESULTS_DIR}/checkm/SKIPPED.txt
+run_maxbin2() {
+    echo "STEP 2.2: Running MaxBin2 binning..."
+    conda activate maxbin2_env
     
-    # Run basic bin analysis instead
-    if [ -f "${WORK_DIR}/code/analyze_bins.py" ]; then
-        echo "Running basic bin analysis..."
-        python3 ${WORK_DIR}/code/analyze_bins.py
-    fi
-    CHECKM_CMD=""
-fi
-
-if [ -n "$CHECKM_CMD" ]; then
-    # CheckM on all MetaBAT2 bins (combine all types)
-    echo "CheckM analysis for all MetaBAT2 bins..."
-    mkdir -p ${RESULTS_DIR}/checkm/all_metabat2_bins
-    
-    # Copy all MetaBAT2 bins to one directory for CheckM
-    find ${RESULTS_DIR}/metabat2 -name "*.fa" -exec cp {} ${RESULTS_DIR}/checkm/all_metabat2_bins/ \;
-    
-    if [ "$(ls -A ${RESULTS_DIR}/checkm/all_metabat2_bins/ 2>/dev/null)" ]; then
-        eval "$CHECKM_CMD lineage_wf ${RESULTS_DIR}/checkm/all_metabat2_bins \
-                         ${RESULTS_DIR}/checkm/metabat2_comprehensive \
-                         -t ${THREADS} \
-                         --file ${RESULTS_DIR}/checkm/metabat2_comprehensive_quality.txt \
-                         --tab_table \
-                         -x fa"
-    fi
-
-    # CheckM on all MaxBin2 bins
-    if [ -d "${RESULTS_DIR}/maxbin2" ]; then
-        echo "CheckM analysis for all MaxBin2 bins..."
-        mkdir -p ${RESULTS_DIR}/checkm/all_maxbin2_bins
-        find ${RESULTS_DIR}/maxbin2 -name "*.fasta" -exec cp {} ${RESULTS_DIR}/checkm/all_maxbin2_bins/ \;
+    # Check if MaxBin2 already completed successfully
+    if [ -d "${RESULTS_DIR}/maxbin2" ] && [ $(ls ${RESULTS_DIR}/maxbin2/bin*.fasta 2>/dev/null | wc -l) -gt 0 ]; then
+        MAXBIN2_BINS=$(ls ${RESULTS_DIR}/maxbin2/bin*.fasta 2>/dev/null | wc -l)
+        echo "  ✓ MaxBin2 already completed: $MAXBIN2_BINS bins found, skipping..."
+    elif ! command -v run_MaxBin.pl &> /dev/null; then
+        echo "  ⚠ MaxBin2 not found, skipping..."
+        mkdir -p ${RESULTS_DIR}/maxbin2
+        echo "MaxBin2 not available" > ${RESULTS_DIR}/maxbin2/SKIPPED.txt
+        MAXBIN2_BINS=0
+    else
+        # Create abundance files for MaxBin2
+        echo "  Preparing abundance files..."
+        ABUND_FILES=""
+        SAMPLE_COUNT=0
         
-        if [ "$(ls -A ${RESULTS_DIR}/checkm/all_maxbin2_bins/ 2>/dev/null)" ]; then
-            eval "$CHECKM_CMD lineage_wf ${RESULTS_DIR}/checkm/all_maxbin2_bins \
-                             ${RESULTS_DIR}/checkm/maxbin2_comprehensive \
-                             -t ${THREADS} \
-                             --file ${RESULTS_DIR}/checkm/maxbin2_comprehensive_quality.txt \
-                             --tab_table \
-                             -x fasta"
-        fi
-    fi
-
-    # CheckM on all VAMB bins
-    if [ -d "${RESULTS_DIR}/vamb" ]; then
-        echo "CheckM analysis for all VAMB bins..."
-        mkdir -p ${RESULTS_DIR}/checkm/all_vamb_bins
-        find ${RESULTS_DIR}/vamb -name "*.fna" -exec cp {} ${RESULTS_DIR}/checkm/all_vamb_bins/ \;
+        for i in $(seq 4 2 20); do  # Sample depth columns
+            col_data=$(cut -f${i} ${RESULTS_DIR}/coassembly_depth.txt | head -20 | tail -10)
+            if [[ -n "$col_data" ]] && [[ "$col_data" != *"0.0000"* ]]; then
+                SAMPLE_COUNT=$((SAMPLE_COUNT + 1))
+                cut -f1,${i} ${RESULTS_DIR}/coassembly_depth.txt > ${RESULTS_DIR}/maxbin2_abundance_${SAMPLE_COUNT}.txt
+                if [ $SAMPLE_COUNT -eq 1 ]; then
+                    ABUND_FILES="${ABUND_FILES} -abund ${RESULTS_DIR}/maxbin2_abundance_${SAMPLE_COUNT}.txt"
+                else
+                    ABUND_FILES="${ABUND_FILES} -abund${SAMPLE_COUNT} ${RESULTS_DIR}/maxbin2_abundance_${SAMPLE_COUNT}.txt"
+                fi
+            fi
+        done
         
-        if [ "$(ls -A ${RESULTS_DIR}/checkm/all_vamb_bins/ 2>/dev/null)" ]; then
-            eval "$CHECKM_CMD lineage_wf ${RESULTS_DIR}/checkm/all_vamb_bins \
-                             ${RESULTS_DIR}/checkm/vamb_comprehensive \
-                             -t ${THREADS} \
-                             --file ${RESULTS_DIR}/checkm/vamb_comprehensive_quality.txt \
-                             --tab_table \
-                             -x fna"
-        fi
-    fi
-
-    # CheckM on methane-targeted bins (PRIORITY!)
-    if [ -d "${RESULTS_DIR}/methane_targeted" ]; then
-        echo "🔥 Priority CheckM analysis for methane-targeted bins..."
-        checkm_bins=$(ls ${RESULTS_DIR}/methane_targeted/*.fa 2>/dev/null | wc -l)
-        if [ $checkm_bins -gt 0 ]; then
-            checkm lineage_wf ${RESULTS_DIR}/methane_targeted \
-                             ${RESULTS_DIR}/checkm/methane_targeted \
-                             -t ${THREADS} \
-                             --file ${RESULTS_DIR}/checkm/methane_targeted_quality.txt \
-                             --tab_table \
-                             -x fa
+        echo "  Running MaxBin2 with $SAMPLE_COUNT abundance files..."
+        
+        # Check if this is the old MaxBin that requires a seed file
+        if MaxBin 2>&1 | grep -q "seed file"; then
+            echo "  Detected old MaxBin version requiring seed file, creating proper seed..."
             
-            echo "🎯 Methane bin quality assessment completed!"
-            echo "Priority results: ${RESULTS_DIR}/checkm/methane_targeted_quality.txt"
+            # Create seed file by extracting only contig names (headers without '>')
+            echo "  Extracting first 10 contig names as seeds..."
+            grep "^>" ${COASSEMBLY_FASTA} | head -10 | sed 's/^>//' | sed 's/ .*//' > ${RESULTS_DIR}/maxbin2_seed.txt
+            
+            # Verify seed file contains contig names
+            seed_count=$(wc -l < ${RESULTS_DIR}/maxbin2_seed.txt 2>/dev/null || echo 0)
+            echo "  Created seed file with $seed_count contig names"
+            
+            if [ $seed_count -lt 1 ]; then
+                echo "  ⚠ Seed file creation failed, skipping MaxBin2..."
+                mkdir -p ${RESULTS_DIR}/maxbin2
+                echo "Seed file creation failed" > ${RESULTS_DIR}/maxbin2/SKIPPED.txt
+                MAXBIN2_BINS=0
+            else
+                # Use direct MaxBin command with proper seed file (contig names only)
+                echo "  Running MaxBin with seed file containing $seed_count contig names..."
+                MaxBin -fasta ${COASSEMBLY_FASTA} \
+                       -seed ${RESULTS_DIR}/maxbin2_seed.txt \
+                       ${ABUND_FILES} \
+                       -out ${RESULTS_DIR}/maxbin2/bin \
+                       -thread ${THREADS}
+            fi
+        else
+            # Try the wrapper for newer versions
+            run_MaxBin.pl -fasta ${COASSEMBLY_FASTA} \
+                          ${ABUND_FILES} \
+                          -out ${RESULTS_DIR}/maxbin2/bin \
+                          -thread ${THREADS} \
+                          -min_contig_length 2500
+        fi
+        
+        # Count MaxBin2 bins
+        MAXBIN2_BINS=$(ls ${RESULTS_DIR}/maxbin2/bin*.fasta 2>/dev/null | wc -l)
+        echo "  ✓ MaxBin2 completed: $MAXBIN2_BINS bins generated"
+    fi
+}
+
+run_vamb() {
+    echo "STEP 2.3: Running VAMB binning..."
+    conda activate metagenome_binning
+    
+    # Check if VAMB already completed successfully
+    if [ -d "${RESULTS_DIR}/vamb/bins" ] && [ $(ls ${RESULTS_DIR}/vamb/bins/*.fna 2>/dev/null | wc -l) -gt 0 ]; then
+        VAMB_BINS=$(ls ${RESULTS_DIR}/vamb/bins/*.fna 2>/dev/null | wc -l)
+        echo "  ✓ VAMB already completed: $VAMB_BINS bins found, skipping..."
+    elif ! command -v vamb &> /dev/null; then
+        echo "  ⚠ VAMB not found, skipping..."
+        mkdir -p ${RESULTS_DIR}/vamb
+        echo "VAMB not available" > ${RESULTS_DIR}/vamb/SKIPPED.txt
+        VAMB_BINS=0
+    else
+        echo "  Running VAMB..."
+        # Remove existing VAMB directory to avoid FileExistsError
+        rm -rf ${RESULTS_DIR}/vamb
+        
+        vamb --outdir ${RESULTS_DIR}/vamb \
+             --fasta ${COASSEMBLY_FASTA} \
+             --bamfiles ${RESULTS_DIR}/*_coassembly_sorted.bam \
+             -m 2500 \
+             --minfasta 200000
+        
+        # Count VAMB bins
+        VAMB_BINS=$(ls ${RESULTS_DIR}/vamb/bins/*.fna 2>/dev/null | wc -l)
+        echo "  ✓ VAMB completed: $VAMB_BINS bins generated"
+    fi
+}
+
+run_dastool() {
+    echo "STEP 3: Running DAS Tool for bin optimization..."
+    conda activate dastool_env
+    
+    # Check if DAS Tool already completed successfully
+    if [ -d "${RESULTS_DIR}/dastool/optimized_DASTool_bins" ] && [ $(ls ${RESULTS_DIR}/dastool/optimized_DASTool_bins/*.fa 2>/dev/null | wc -l) -gt 0 ]; then
+        echo "  ✓ DAS Tool already completed, skipping..."
+    elif ! command -v DAS_Tool &> /dev/null; then
+        echo "  ⚠ DAS Tool not found, skipping optimization..."
+        mkdir -p ${RESULTS_DIR}/dastool
+        echo "DAS Tool not available" > ${RESULTS_DIR}/dastool/SKIPPED.txt
+    else
+        # Try to fix DAS Tool R dependency issues
+        echo "  Checking DAS Tool R dependencies..."
+        
+        # Test if DAS Tool works with a simple help command
+        if ! DAS_Tool --help &>/dev/null; then
+            echo "  ⚠ DAS Tool has R dependency issues, attempting to fix..."
+            
+            # Try to reinstall docopt in R
+            R --slave -e "if (!require('docopt', quietly=TRUE)) { install.packages('docopt', repos='https://cran.r-project.org/', dependencies=TRUE) }" 2>/dev/null || true
+            
+            # If still not working, skip DAS Tool
+            if ! DAS_Tool --help &>/dev/null; then
+                echo "  ⚠ Could not fix DAS Tool R dependencies, skipping..."
+                echo "  You can manually fix this later with:"
+                echo "    conda activate dastool_env"
+                echo "    R --slave -e \"install.packages('docopt', repos='https://cran.r-project.org/')\""
+                mkdir -p ${RESULTS_DIR}/dastool
+                echo "DAS Tool R dependency error" > ${RESULTS_DIR}/dastool/SKIPPED.txt
+                return
+            fi
+        fi
+        
+        # Find DAS Tool script directory
+        DASTOOL_SCRIPTS=$(dirname $(which DAS_Tool))
+        
+        # Prepare bin-to-contig tables for DAS Tool
+        echo "  Preparing bin-to-contig mapping files..."
+        
+        # Initialize variables
+        BIN_SETS=""
+        BIN_LABELS=""
+        
+        # MetaBAT2 mapping
+        if [ -d "${RESULTS_DIR}/metabat2" ] && [ $(ls ${RESULTS_DIR}/metabat2/bin*.fa 2>/dev/null | wc -l) -gt 0 ]; then
+            ${DASTOOL_SCRIPTS}/Fasta_to_Contig2Bin.sh -i ${RESULTS_DIR}/metabat2 \
+                                                       -e fa > ${RESULTS_DIR}/metabat2_contigs2bins.tsv
+            BIN_SETS="${BIN_SETS},${RESULTS_DIR}/metabat2_contigs2bins.tsv"
+            BIN_LABELS="${BIN_LABELS},MetaBAT2"
+        fi
+        
+        # MaxBin2 mapping
+        if [ -d "${RESULTS_DIR}/maxbin2" ] && [ $(ls ${RESULTS_DIR}/maxbin2/bin*.fasta 2>/dev/null | wc -l) -gt 0 ]; then
+            ${DASTOOL_SCRIPTS}/Fasta_to_Contig2Bin.sh -i ${RESULTS_DIR}/maxbin2 \
+                                                       -e fasta > ${RESULTS_DIR}/maxbin2_contigs2bins.tsv
+            BIN_SETS="${BIN_SETS},${RESULTS_DIR}/maxbin2_contigs2bins.tsv"
+            BIN_LABELS="${BIN_LABELS},MaxBin2"
+        fi
+        
+        # VAMB mapping
+        if [ -d "${RESULTS_DIR}/vamb/bins" ] && [ $(ls ${RESULTS_DIR}/vamb/bins/*.fna 2>/dev/null | wc -l) -gt 0 ]; then
+            ${DASTOOL_SCRIPTS}/Fasta_to_Contig2Bin.sh -i ${RESULTS_DIR}/vamb/bins \
+                                                       -e fna > ${RESULTS_DIR}/vamb_contigs2bins.tsv
+            BIN_SETS="${BIN_SETS},${RESULTS_DIR}/vamb_contigs2bins.tsv"
+            BIN_LABELS="${BIN_LABELS},VAMB"
+        fi
+        
+        # Remove leading commas
+        BIN_SETS=${BIN_SETS#,}
+        BIN_LABELS=${BIN_LABELS#,}
+        
+        if [ -n "$BIN_SETS" ]; then
+            echo "  Running DAS Tool with bin sets: $BIN_LABELS"
+            
+            # Try running DAS Tool with error handling
+            echo "  Command: DAS_Tool -i \"$BIN_SETS\" -l \"$BIN_LABELS\" -c \"${COASSEMBLY_FASTA}\" -o \"${RESULTS_DIR}/dastool/optimized\" --threads ${THREADS} --write_bins"
+            
+            if DAS_Tool -i "$BIN_SETS" \
+                        -l "$BIN_LABELS" \
+                        -c "${COASSEMBLY_FASTA}" \
+                        -o "${RESULTS_DIR}/dastool/optimized" \
+                        --threads ${THREADS} \
+                        --write_bins; then
+                echo "  ✓ DAS Tool optimization completed"
+            else
+                echo "  ⚠ DAS Tool failed, but continuing pipeline..."
+                echo "DAS Tool execution failed" > ${RESULTS_DIR}/dastool/FAILED.txt
+            fi
+        else
+            echo "  ⚠ No valid bin sets found for optimization"
         fi
     fi
+}
 
-    # CheckM on comprehensive DAS Tool bins
-    if [ -d "${RESULTS_DIR}/das_tool/comprehensive_DASToolBins_DASTool_bins" ]; then
-        echo "CheckM analysis for comprehensive DAS Tool bins..."
-        checkm lineage_wf ${RESULTS_DIR}/das_tool/comprehensive_DASToolBins_DASTool_bins \
-                         ${RESULTS_DIR}/checkm/dastool_comprehensive \
-                         -t ${THREADS} \
-                         --file ${RESULTS_DIR}/checkm/dastool_comprehensive_quality.txt \
-                         --tab_table \
-                         -x fa
+run_checkm() {
+    echo "STEP 4: Running CheckM quality assessment..."
+    conda activate checkm_env
+    
+    # Check if CheckM already completed successfully
+    if [ -f "${RESULTS_DIR}/checkm/results/storage/bin_stats_ext.tsv" ]; then
+        echo "  ✓ CheckM already completed, skipping..."
+    elif ! command -v checkm &> /dev/null; then
+        echo "  ⚠ CheckM not found, skipping quality assessment..."
+        mkdir -p ${RESULTS_DIR}/checkm
+        echo "CheckM not available" > ${RESULTS_DIR}/checkm/SKIPPED.txt
+    else
+        # Check CheckM setup first
+        echo "  Checking CheckM setup..."
+        
+        # Test CheckM basic functionality
+        if ! checkm --version &>/dev/null; then
+            echo "  ⚠ CheckM version check failed, there may be setup issues"
+        fi
+        
+        # Check for required dependencies
+        missing_deps=""
+        if ! command -v prodigal &>/dev/null; then
+            missing_deps="${missing_deps} prodigal"
+        fi
+        if ! command -v pplacer &>/dev/null; then
+            missing_deps="${missing_deps} pplacer"
+        fi
+        if ! command -v hmmsearch &>/dev/null; then
+            missing_deps="${missing_deps} hmmer"
+        fi
+        
+        if [ -n "$missing_deps" ]; then
+            echo "  ⚠ Missing dependencies:$missing_deps"
+            echo "  Install with: conda install -c bioconda$missing_deps"
+        fi
+        
+        # Assess quality of all bins
+        echo "  Assessing bin quality with CheckM..."
+        
+        # Create directory for all bins
+        mkdir -p ${RESULTS_DIR}/checkm/all_bins
+        
+        # Copy all bins to one directory for CheckM
+        echo "  Collecting bins from different binning methods..."
+        bin_count=0
+        
+        if [ -d "${RESULTS_DIR}/metabat2" ]; then
+            metabat2_bins=$(ls ${RESULTS_DIR}/metabat2/bin*.fa 2>/dev/null | wc -l)
+            if [ $metabat2_bins -gt 0 ]; then
+                cp ${RESULTS_DIR}/metabat2/bin*.fa ${RESULTS_DIR}/checkm/all_bins/ 2>/dev/null || true
+                bin_count=$((bin_count + metabat2_bins))
+                echo "    MetaBAT2: $metabat2_bins bins"
+            fi
+        fi
+        
+        if [ -d "${RESULTS_DIR}/maxbin2" ]; then
+            maxbin2_bins=$(ls ${RESULTS_DIR}/maxbin2/bin*.fasta 2>/dev/null | wc -l)
+            if [ $maxbin2_bins -gt 0 ]; then
+                cp ${RESULTS_DIR}/maxbin2/bin*.fasta ${RESULTS_DIR}/checkm/all_bins/ 2>/dev/null || true
+                bin_count=$((bin_count + maxbin2_bins))
+                echo "    MaxBin2: $maxbin2_bins bins"
+            fi
+        fi
+        
+        if [ -d "${RESULTS_DIR}/vamb/bins" ]; then
+            vamb_bins=$(ls ${RESULTS_DIR}/vamb/bins/*.fna 2>/dev/null | wc -l)
+            if [ $vamb_bins -gt 0 ]; then
+                cp ${RESULTS_DIR}/vamb/bins/*.fna ${RESULTS_DIR}/checkm/all_bins/ 2>/dev/null || true
+                bin_count=$((bin_count + vamb_bins))
+                echo "    VAMB: $vamb_bins bins"
+            fi
+        fi
+        
+        # If DAS Tool was successful, also include optimized bins
+        if [ -d "${RESULTS_DIR}/dastool/optimized_DASTool_bins" ]; then
+            dastool_bins=$(ls ${RESULTS_DIR}/dastool/optimized_DASTool_bins/*.fa 2>/dev/null | wc -l)
+            if [ $dastool_bins -gt 0 ]; then
+                cp ${RESULTS_DIR}/dastool/optimized_DASTool_bins/*.fa ${RESULTS_DIR}/checkm/all_bins/ 2>/dev/null || true
+                bin_count=$((bin_count + dastool_bins))
+                echo "    DAS Tool: $dastool_bins bins"
+            fi
+        fi
+        
+        # Convert all bin files to .fa extension for consistency
+        echo "  Standardizing file extensions..."
+        cd ${RESULTS_DIR}/checkm/all_bins
+        for file in *.fasta; do
+            [ -f "$file" ] && mv "$file" "${file%.fasta}.fa"
+        done
+        for file in *.fna; do
+            [ -f "$file" ] && mv "$file" "${file%.fna}.fa"
+        done
+        cd - > /dev/null
+        
+        # Final count after processing
+        final_bin_count=$(ls ${RESULTS_DIR}/checkm/all_bins/*.fa 2>/dev/null | wc -l)
+        echo "  Total bins collected: $final_bin_count"
+        
+        if [ $final_bin_count -eq 0 ]; then
+            echo "  ⚠ No bins found for CheckM analysis"
+            echo "  Make sure binning steps completed successfully first"
+            mkdir -p ${RESULTS_DIR}/checkm
+            echo "No bins found for analysis" > ${RESULTS_DIR}/checkm/SKIPPED.txt
+            return
+        fi
+        
+        # Check bin file sizes
+        echo "  Checking bin sizes..."
+        small_bins=$(find ${RESULTS_DIR}/checkm/all_bins -name "*.fa" -size -1k | wc -l)
+        if [ $small_bins -gt 0 ]; then
+            echo "  ⚠ Warning: $small_bins bins are smaller than 1KB"
+        fi
+        
+        # Run CheckM lineage workflow with error handling
+        echo "  Running CheckM lineage workflow..."
+        echo "  This may take a while depending on the number of bins..."
+        
+        # Create results directory
+        mkdir -p ${RESULTS_DIR}/checkm/results
+        
+        # Run CheckM with timeout and error handling
+        if timeout 3600 checkm lineage_wf -t ${THREADS} \
+                                         -x fa \
+                                         ${RESULTS_DIR}/checkm/all_bins \
+                                         ${RESULTS_DIR}/checkm/results 2>&1 | tee ${RESULTS_DIR}/checkm/checkm.log; then
+            
+            # Check if results were generated
+            if [ -f "${RESULTS_DIR}/checkm/results/storage/bin_stats_ext.tsv" ]; then
+                echo "  ✓ CheckM quality assessment completed successfully"
+                
+                # Show summary
+                result_lines=$(wc -l < ${RESULTS_DIR}/checkm/results/storage/bin_stats_ext.tsv)
+                echo "  Results: $((result_lines - 1)) bins analyzed"
+                
+                # Show high-quality bins preview
+                echo "  High-quality bins (>90% complete, <5% contamination):"
+                awk 'NR>1 && $12>=90 && $13<=5 {print "    " $1 ": " $12 "% complete, " $13 "% contamination"}' \
+                    ${RESULTS_DIR}/checkm/results/storage/bin_stats_ext.tsv | head -5
+                
+            else
+                echo "  ⚠ CheckM completed but results file not found"
+                echo "  Check log: ${RESULTS_DIR}/checkm/checkm.log"
+            fi
+        else
+            echo "  ⚠ CheckM failed or timed out"
+            echo "  Check log: ${RESULTS_DIR}/checkm/checkm.log"
+            echo "  You can try running with fewer threads or bins"
+            echo "CheckM execution failed" > ${RESULTS_DIR}/checkm/FAILED.txt
+        fi
     fi
-fi
+}
+
+extract_hq_bins() {
+    echo "STEP 5: Extracting high-quality bins..."
+    
+    mkdir -p ${RESULTS_DIR}/high_quality_bins
+    
+    if [ -f "${RESULTS_DIR}/checkm/results/storage/bin_stats_ext.tsv" ]; then
+        echo "  Filtering bins by quality criteria:"
+        echo "    - Completeness ≥ 90%"
+        echo "    - Contamination ≤ 5%"
+        
+        # Extract high-quality bins based on CheckM results
+        awk 'NR>1 && $12>=90 && $13<=5 {print $1}' ${RESULTS_DIR}/checkm/results/storage/bin_stats_ext.tsv > ${RESULTS_DIR}/high_quality_bin_list.txt
+        
+        HQ_COUNT=0
+        while read -r bin_name; do
+            if [ -f "${RESULTS_DIR}/checkm/all_bins/${bin_name}.fa" ]; then
+                cp "${RESULTS_DIR}/checkm/all_bins/${bin_name}.fa" "${RESULTS_DIR}/high_quality_bins/"
+                HQ_COUNT=$((HQ_COUNT + 1))
+            fi
+        done < ${RESULTS_DIR}/high_quality_bin_list.txt
+        
+        echo "  ✓ Extracted $HQ_COUNT high-quality bins"
+    else
+        echo "  ⚠ CheckM results not found, extracting by size (>1MB) as proxy..."
+        
+        # Fallback: extract bins larger than 1MB as potential high-quality
+        find ${RESULTS_DIR}/checkm/all_bins -name "*.fa" -size +1M -exec cp {} ${RESULTS_DIR}/high_quality_bins/ \;
+        
+        HQ_COUNT=$(ls -1 ${RESULTS_DIR}/high_quality_bins/*.fa 2>/dev/null | wc -l)
+        echo "  ✓ Extracted $HQ_COUNT large bins (>1MB) as potential high-quality"
+    fi
+}
+
+# Main execution logic
+case $STEP in
+    prep)
+        prep_data
+        ;;
+    metabat)
+        prep_data
+        run_metabat2
+        ;;
+    maxbin)
+        prep_data
+        run_maxbin2
+        ;;
+    vamb)
+        prep_data
+        run_vamb
+        ;;
+    dastool)
+        run_dastool
+        ;;
+    checkm)
+        run_checkm
+        ;;
+    extract)
+        extract_hq_bins
+        ;;
+    all)
+        prep_data
+        run_metabat2
+        run_maxbin2
+        run_vamb
+        run_dastool
+        run_checkm
+        extract_hq_bins
+        ;;
+    *)
+        echo "Error: Unknown step '$STEP'"
+        usage
+        ;;
+esac
 
 echo ""
 echo "========================================================"
-echo "COMPREHENSIVE BINNING COMPLETED!"
+echo "STEP '$STEP' COMPLETED!"
 echo "========================================================"
+echo "Results location: ${RESULTS_DIR}"
 echo ""
-echo "Results saved in: ${RESULTS_DIR}"
-echo ""
-echo "Binning strategy overview:"
-echo "1. Standard binning (conservative parameters)"
-echo "2. Relaxed binning (lower thresholds for methane genes)"
-echo "3. Inclusive binning (very permissive parameters)"
-echo "4. Targeted methane binning (methane-containing contigs)"
-echo "5. Final aggressive binning (remaining unbinned contigs)"
-echo ""
-echo "Output summary:"
-echo "🧬 MetaBAT2 results:"
-echo "  - Standard bins: ${RESULTS_DIR}/metabat2/coassembly_bin*"
-echo "  - Relaxed bins: ${RESULTS_DIR}/metabat2/relaxed_bin*"
-echo "  - Inclusive bins: ${RESULTS_DIR}/metabat2/inclusive_bin*"
-echo "  - Final bins: ${RESULTS_DIR}/metabat2/final_bin*"
-echo ""
-echo "🔬 MaxBin2 results:"
-echo "  - Standard bins: ${RESULTS_DIR}/maxbin2/coassembly_bin*"
-echo "  - Relaxed bins: ${RESULTS_DIR}/maxbin2/relaxed_bin*"
-echo ""
-echo "🌐 VAMB results:"
-echo "  - Standard bins: ${RESULTS_DIR}/vamb/standard/*"
-echo "  - Relaxed bins: ${RESULTS_DIR}/vamb/relaxed/*"
-echo "  - Inclusive bins: ${RESULTS_DIR}/vamb/inclusive/*"
-echo ""
-echo "🔥 Methane-targeted results:"
-echo "  - All methane bins: ${RESULTS_DIR}/methane_targeted/*"
-echo "  - mcrA-specific bins: ${RESULTS_DIR}/methane_targeted/mcrA_bin*"
-echo "  - pmoA-specific bins: ${RESULTS_DIR}/methane_targeted/pmoA_bin*"
-echo ""
-echo "⚡ DAS Tool integrated bins:"
-echo "  - Comprehensive bins: ${RESULTS_DIR}/das_tool/comprehensive_DASToolBins_DASTool_bins/"
-echo ""
-echo "📊 Analysis files:"
-echo "  - Individual sample BAMs: ${RESULTS_DIR}/*_coassembly_sorted.bam"
-echo "  - Differential coverage: ${RESULTS_DIR}/coassembly_depth.txt"
-echo "  - Unbinned contigs: ${RESULTS_DIR}/unbinned_contigs.fa"
-echo ""
-echo "📈 Expected improvements:"
-echo "  - Dramatically increased binning efficiency (from 7.1% to 40-60%)"
-echo "  - Capture of methane-containing contigs"
-echo "  - Better representation of low-abundance organisms"
-echo "  - Multiple parameter sets for different organism types"
-echo ""
-echo "🎯 Next steps for methane analysis:"
-echo "  1. Check methane-targeted bins first: ${RESULTS_DIR}/methane_targeted/"
-echo "  2. Run comprehensive bin quality assessment"
-echo "  3. Annotate all bins, especially methane-targeted ones"
-echo "  4. Compare results with original 8 bins"
-echo ""
-echo "Quality assessment reports (if CheckM available):"
-echo "  - MetaBAT2: ${RESULTS_DIR}/checkm/metabat2_quality.txt"
-echo "  - MaxBin2: ${RESULTS_DIR}/checkm/maxbin2_quality.txt"
-echo "  - VAMB: ${RESULTS_DIR}/checkm/vamb_quality.txt"
-echo "  - DAS Tool: ${RESULTS_DIR}/checkm/dastool_quality.txt"
-echo "  - Methane bins: ${RESULTS_DIR}/checkm/methane_quality.txt"
