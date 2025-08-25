@@ -25,8 +25,8 @@ farting_trees/
 │   ├── setup_binning_envs.sh      # Environment setup script
 │   └── install_checkm2.sh         # CheckM2 installation script
 ├── data/                          # Input FASTQ files
-│   ├── 53394_R1_*.fastq.gz
-│   ├── 53394_R2_*.fastq.gz
+│   ├── sample1_R1_*.fastq.gz
+│   ├── sample1_R2_*.fastq.gz
 │   └── ... (more samples)
 └── results/                       # All pipeline outputs
     ├── 01_qc/
@@ -73,10 +73,10 @@ This creates the following conda environments:
 Place your paired-end FASTQ files in the `data/` directory:
 ```
 data/
-├── 53394_R1_001.fastq.gz
-├── 53394_R2_001.fastq.gz
-├── 53395_R1_001.fastq.gz
-├── 53395_R2_001.fastq.gz
+├── sample1_R1_001.fastq.gz
+├── sample1_R2_001.fastq.gz
+├── sample2_R1_001.fastq.gz
+├── sample2_R2_001.fastq.gz
 └── ...
 ```
 
@@ -90,3 +90,65 @@ bash code/03_quast.sh
 bash code/04_mapping.sh
 bash code/05_binning.sh all
 ```
+
+## Detailed Pipeline Steps
+
+### 01_qc.sh — Quality Control & Primer Removal
+- **Purpose:** Cleans raw FASTQ files by removing adapters.
+- **Main tools:** fastp (adapter/primer trimming, quality filtering), FastQC (quality reports), MultiQC (summary report)
+- **Inputs:** Paired-end FASTQ files from `data/`
+- **Outputs:** Cleaned FASTQ files in `results/01_qc/`, quality reports in `results/01_qc/`
+- **Key steps:**
+  1. Run fastp on each sample to trim adapters/primers and filter low-quality reads.
+  2. Generate FastQC reports for raw and cleaned reads.
+  3. Summarize QC results with MultiQC.
+
+### 02_assembly.sh — Assembly
+- **Purpose:** Assembles cleaned reads into contigs for each sample.
+- **Main tools:** metaSPAdes (metagenome assembler)
+- **Inputs:** Cleaned FASTQ files from `results/01_qc/`
+- **Outputs:** Assembled contigs in `results/02_assembly/`
+- **Key steps:**
+  1. Run metaSPAdes for each sample using paired-end cleaned reads.
+  2. Output contigs and assembly logs for each sample.
+
+### 03_quast.sh — Assembly Quality Assessment
+- **Purpose:** Evaluates the quality of each assembly.
+- **Main tools:** QUAST
+- **Inputs:** Assembled contigs from `results/02_assembly/`
+- **Outputs:** QUAST reports in `results/03_quast/`
+- **Key steps:**
+  1. Run QUAST on each assembly to calculate N50, total length, GC content, etc.
+  2. Summarize assembly statistics for all samples.
+
+### 04_mapping.sh — Read Mapping for Coverage
+- **Purpose:** Maps cleaned reads back to assemblies to estimate coverage for binning.
+- **Main tools:** BWA (alignment), SAMtools (BAM processing)
+- **Inputs:** Cleaned FASTQ files (`results/01_qc/`), assemblies (`results/02_assembly/`)
+- **Outputs:** BAM files and coverage tables in `results/04_mapping/`
+- **Key steps:**
+  1. Index each assembly with BWA.
+  2. Align cleaned reads to assemblies, convert SAM to BAM, sort and index BAM files.
+  3. Calculate per-contig coverage for each sample.
+
+### 05_binning.sh — Binning and Bin Optimization
+- **Purpose:** Groups contigs into bins (putative genomes) using multiple algorithms and refines bins.
+- **Main tools:** MetaBAT2, MaxBin2, VAMB, DAS Tool
+- **Inputs:** Assemblies (`results/02_assembly/`), coverage tables (`results/04_mapping/`)
+- **Outputs:** Binning results in `results/05_binning/` (one folder per tool), DAS Tool optimized bins
+- **Key steps:**
+  1. Run MetaBAT2, MaxBin2, and VAMB on each assembly using coverage information.
+  2. Collect bins from all tools.
+  3. Run DAS Tool to select and optimize the best bins from all methods.
+
+### install_checkm2.sh — CheckM2 Installation
+- **Purpose:** Installs the CheckM2 tool and its dependencies in a dedicated conda environment.
+- **Outputs:** `checkm2_env` conda environment ready for use.
+
+### setup_binning_envs.sh — Environment Setup
+- **Purpose:** Installs all required conda environments for the pipeline (QC, assembly, mapping, binning, etc.).
+- **Outputs:** All conda environments listed in the Quick Start section.
+
+---
+
+For more details on each script, see the comments at the top of each `.sh` file in the `code/` directory.
