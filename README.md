@@ -22,8 +22,7 @@ farting_trees/
 │   ├── 03_quast.sh                # Assembly quality assessment
 │   ├── 04_mapping.sh              # Read mapping for coverage
 │   ├── 05_binning.sh              # Complete binning pipeline
-│   ├── setup_binning_envs.sh      # Environment setup script
-│   └── install_checkm2.sh         # CheckM2 installation script
+│   └── setup_binning_envs.sh      # Environment setup script
 ├── data/                          # Input FASTQ files
 │   ├── sample1_R1_*.fastq.gz
 │   ├── sample1_R2_*.fastq.gz
@@ -53,8 +52,6 @@ First, set up all required conda environments:
 # Setup all binning environments at once
 bash code/setup_binning_envs.sh
 
-# Or setup CheckM2 only (faster option)
-bash code/install_checkm2.sh
 ```
 
 This creates the following conda environments:
@@ -92,6 +89,10 @@ bash code/05_binning.sh all
 ```
 
 ## Detailed Pipeline Steps
+
+### setup_binning_envs.sh — Environment Setup
+- **Purpose:** Installs all required conda environments for the pipeline (QC, assembly, mapping, binning, etc.).
+- **Outputs:** All conda environments listed in the Quick Start section.
 
 ### 01_qc.sh — Quality Control & Primer Removal
 - **Purpose:** Cleans raw FASTQ files by removing adapters.
@@ -133,21 +134,14 @@ bash code/05_binning.sh all
 
 ### 05_binning.sh — Binning and Bin Optimization
 - **Purpose:** Groups contigs into bins (putative genomes) using multiple algorithms and refines bins.
-- **Main tools:** MetaBAT2, MaxBin2, VAMB, DAS Tool
+- **Main tools:** MetaBAT2, MaxBin2, DAS Tool, checkm2
 - **Inputs:** Assemblies (`results/02_assembly/`), coverage tables (`results/04_mapping/`)
-- **Outputs:** Binning results in `results/05_binning/` (one folder per tool), DAS Tool optimized bins
+- **Outputs:** Binning results in `results/05_binning/` (one folder per tool), DAS Tool optimized bins, checkm2 report
 - **Key steps:**
-  1. Run MetaBAT2, MaxBin2, and VAMB on each assembly using coverage information.
+  1. Run MetaBAT2 and MaxBin2 on each assembly using coverage information.
   2. Collect bins from all tools.
   3. Run DAS Tool to select and optimize the best bins from all methods.
-
-### install_checkm2.sh — CheckM2 Installation
-- **Purpose:** Installs the CheckM2 tool and its dependencies in a dedicated conda environment.
-- **Outputs:** `checkm2_env` conda environment ready for use.
-
-### setup_binning_envs.sh — Environment Setup
-- **Purpose:** Installs all required conda environments for the pipeline (QC, assembly, mapping, binning, etc.).
-- **Outputs:** All conda environments listed in the Quick Start section.
+  4. Use checkm2 to assess the quality of bins.
 
 ---
 
